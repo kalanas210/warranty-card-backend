@@ -405,458 +405,456 @@ router.post('/qrcodes/assign', adminAuth, async (req, res) => {
   }
 });
 
+// Updated Download batch QR codes as PDF (A4 sticker layout, duplicate option)
 router.get('/qrcodes/download-pdf/:productId', adminAuth, async (req, res) => {
   try {
     const { productId } = req.params;
-    const qrcodes = await QRCodeModel.find({ productId });
+    const duplicate = req.query.duplicate === 'true';
+    let qrcodes = await QRCodeModel.find({ productId });
+    // Remove duplicates by serialNumber
+    const seen = new Set();
+    qrcodes = qrcodes.filter(qr => {
+      if (seen.has(qr.serialNumber)) return false;
+      seen.add(qr.serialNumber);
+      return true;
+    });
     const product = await Product.findOne({ productId });
-    
     if (!product) {
       return res.status(404).json({ message: 'Product not found' });
     }
-    
-    const doc = new PDFDocument();
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${product.productName}-QRCodes.pdf"`);
-    
-    doc.pipe(res);
-    
-    doc.fontSize(20).text(`QR Codes for ${product.productName}`, { align: 'center' });
-    doc.moveDown();
-    
-    let x = 50;
-    let y = 100;
-    const qrBoxSize = 140; // Total box size including border and serial number
-    const qrCodeSize = 80; // Actual QR code size
-    const borderWidth = 3; // Reduced border width
-    const serialNumberHeight = 20; // Height for serial number
-    const cols = 4; // Reduced columns to accommodate larger boxes
-    
-    for (let i = 0; i < qrcodes.length; i++) {
-      const qrcode = qrcodes[i];
-      const qrUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/qr/${qrcode.serialNumber}`;
-      
-      try {
-        const qrCodeDataUrl = await QRCode.toDataURL(qrUrl, {
-          width: qrCodeSize,
-          margin: 0
-        });
-        const qrImageBuffer = Buffer.from(qrCodeDataUrl.split(',')[1], 'base64');
-        
-        // Draw border around the entire box (QR code + serial number)
-        doc.rect(x, y, qrBoxSize, qrBoxSize)
-           .lineWidth(borderWidth)
-           .strokeColor('#000000')
-           .stroke();
-        
-        // Calculate QR code position (centered in the upper part of the box)
-        const qrStartX = x + (qrBoxSize - qrCodeSize) / 2;
-        const qrStartY = y + (qrBoxSize - qrCodeSize - serialNumberHeight) / 2;
-        
-        // Draw QR code inside the border
-        doc.image(qrImageBuffer, qrStartX, qrStartY, { 
-          width: qrCodeSize, 
-          height: qrCodeSize 
-        });
-        
-        // Add serial number inside the border at the bottom
-        doc.fontSize(10)
-           .fillColor('#000000')
-           .text(qrcode.serialNumber, x, y + qrBoxSize - serialNumberHeight, { 
-             width: qrBoxSize, 
-             align: 'center' 
-           });
-        
-        x += qrBoxSize + 20;
-        if ((i + 1) % cols === 0) {
-          x = 50;
-          y += qrBoxSize + 20;
-        }
-        
-        if (y > 700) {
-          doc.addPage();
-          y = 50;
-          x = 50;
-        }
-      } catch (qrError) {
-        console.error('QR generation error:', qrError);
-        // Draw placeholder if QR generation fails
-        doc.rect(x, y, qrBoxSize, qrBoxSize)
-           .lineWidth(borderWidth)
-           .strokeColor('#cccccc')
-           .stroke();
-        
-        // Calculate QR code position (centered in the upper part of the box)
-        const qrStartX = x + (qrBoxSize - qrCodeSize) / 2;
-        const qrStartY = y + (qrBoxSize - qrCodeSize - serialNumberHeight) / 2;
-        
-        doc.fontSize(10)
-           .fillColor('#666666')
-           .text('QR Error', qrStartX, qrStartY + qrCodeSize/2 - 10, { 
-             width: qrCodeSize, 
-             align: 'center' 
-           });
-        
-        doc.fontSize(10)
-           .fillColor('#000000')
-           .text(qrcode.serialNumber, x, y + qrBoxSize - serialNumberHeight, { 
-             width: qrBoxSize, 
-             align: 'center' 
-           });
-        
-        x += qrBoxSize + 20;
-        if ((i + 1) % cols === 0) {
-          x = 50;
-          y += qrBoxSize + 20;
-        }
-        
-        if (y > 700) {
-          doc.addPage();
-          y = 50;
-          x = 50;
-        }
-      }
-    }
-    
-    doc.end();
-  } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-// Download selected QR codes as PDF
-router.post('/qrcodes/download-selected-pdf', adminAuth, async (req, res) => {
-  try {
-    const { qrIds } = req.body;
-    
-    if (!qrIds || !Array.isArray(qrIds) || qrIds.length === 0) {
-      return res.status(400).json({ message: 'No QR codes selected' });
-    }
-    
-    const qrcodes = await QRCodeModel.find({ _id: { $in: qrIds } });
-    if (qrcodes.length === 0) {
-      return res.status(404).json({ message: 'No QR codes found' });
-    }
-    
-    // Debug logging
-    console.log('Found QR codes:', qrcodes.length);
-    console.log('QR codes:', qrcodes.map(qr => ({ id: qr._id, serialNumber: qr.serialNumber })));
-    
-    // Get product info from first QR code
-    const product = await Product.findOne({ productId: qrcodes[0].productId });
-    if (!product) {
-      return res.status(404).json({ message: 'Product not found' });
-    }
-    
-    const doc = new PDFDocument({
-      size: 'A4',
-      layout: 'portrait'
-    });
-    
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="Selected-QRCodes-${product.productName}.pdf"`);
-    
-    doc.pipe(res);
-    
-    // Page dimensions for A4 (13:10 ratio approximation)
-    const pageWidth = 595.28;
-    const pageHeight = 841.89;
+    // --- Sticker layout on A4 ---
+    const pageWidth = 595.28; // A4 width in points
+    const pageHeight = 841.89; // A4 height in points
     const margin = 40;
-    const usableWidth = pageWidth - (2 * margin);
-    const usableHeight = pageHeight - (2 * margin);
-    
-    // QR code box dimensions (1:1 ratio with border)
-    const qrBoxSize = 140; // Total box size including border and serial number
-    const qrCodeSize = 80; // Actual QR code size
-    const borderWidth = 3; // Reduced border width
-    const serialNumberHeight = 20; // Height for serial number
-    
-    // Calculate grid layout
-    const cols = Math.floor(usableWidth / (qrBoxSize + 20)); // 20px spacing between boxes
-    const rows = Math.floor(usableHeight / (qrBoxSize + 20)); // 20px spacing between rows
-    const qrCodesPerPage = cols * rows;
-    
-    let currentPage = 0;
-    
-    for (let i = 0; i < qrcodes.length; i++) {
-      const qrcode = qrcodes[i];
-      
-      // Add new page if needed
-      if (i > 0 && i % qrCodesPerPage === 0) {
-        doc.addPage();
-        currentPage++;
-      }
-      
-      // Calculate position on current page
-      const pageIndex = i % qrCodesPerPage;
-      const row = Math.floor(pageIndex / cols);
-      const col = pageIndex % cols;
-      
-      // Calculate x, y coordinates
-      const startX = margin + (col * (qrBoxSize + 20));
-      const startY = margin + (row * (qrBoxSize + 20));
-      
-      // Generate QR code
-      const qrUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/qr/${qrcode.serialNumber}`;
-      
-      try {
-        const qrCodeDataUrl = await QRCode.toDataURL(qrUrl, {
-          width: qrCodeSize,
-          margin: 0
-        });
-        const qrImageBuffer = Buffer.from(qrCodeDataUrl.split(',')[1], 'base64');
-        
-        // Draw border around the entire box (QR code + serial number)
-        doc.rect(startX, startY, qrBoxSize, qrBoxSize)
-           .lineWidth(borderWidth)
-           .strokeColor('#000000')
-           .stroke();
-        
-        // Calculate QR code position (centered in the upper part of the box)
-        const qrStartX = startX + (qrBoxSize - qrCodeSize) / 2;
-        const qrStartY = startY + (qrBoxSize - qrCodeSize - serialNumberHeight) / 2;
-        
-        // Draw QR code inside the border
-        doc.image(qrImageBuffer, qrStartX, qrStartY, { 
-          width: qrCodeSize, 
-          height: qrCodeSize 
-        });
-        
-        // Add serial number inside the border at the bottom
-        doc.fontSize(10)
-           .fillColor('#000000')
-           .text(qrcode.serialNumber, startX, startY + qrBoxSize - serialNumberHeight, { 
-             width: qrBoxSize, 
-             align: 'center' 
-           });
-        
-      } catch (qrError) {
-        console.error('QR generation error:', qrError);
-        // Draw placeholder if QR generation fails
-        doc.rect(startX, startY, qrBoxSize, qrBoxSize)
-           .lineWidth(borderWidth)
-           .strokeColor('#cccccc')
-           .stroke();
-        
-        // Calculate QR code position (centered in the upper part of the box)
-        const qrStartX = startX + (qrBoxSize - qrCodeSize) / 2;
-        const qrStartY = startY + (qrBoxSize - qrCodeSize - serialNumberHeight) / 2;
-        
-        doc.fontSize(10)
-           .fillColor('#666666')
-           .text('QR Error', qrStartX, qrStartY + qrCodeSize/2 - 10, { 
-             width: qrCodeSize, 
-             align: 'center' 
-           });
-        
-        doc.fontSize(10)
-           .fillColor('#000000')
-           .text(qrcode.serialNumber, startX, startY + qrBoxSize - serialNumberHeight, { 
-             width: qrBoxSize, 
-             align: 'center' 
-           });
-      }
-    }
-    
-    doc.end();
-  } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-// Generate sticker sheet PDF
-router.post('/qrcodes/sticker-sheet', adminAuth, async (req, res) => {
-  try {
-    const { qrIds, verticalSpacing = 0.05, horizontalSpacing = 0 } = req.body;
-    
-    if (!qrIds || !Array.isArray(qrIds) || qrIds.length === 0) {
-      return res.status(400).json({ message: 'No QR codes selected' });
-    }
-    
-    const qrcodes = await QRCodeModel.find({ _id: { $in: qrIds } });
-    if (qrcodes.length === 0) {
-      return res.status(404).json({ message: 'No QR codes found' });
-    }
-    
-    // Debug logging
-    console.log('Found QR codes:', qrcodes.length);
-    console.log('QR codes:', qrcodes.map(qr => ({ id: qr._id, serialNumber: qr.serialNumber })));
-    
-    // Get product info from first QR code
-    const product = await Product.findOne({ productId: qrcodes[0].productId });
-    if (!product) {
-      return res.status(404).json({ message: 'Product not found' });
-    }
-    
-    // Create custom page size: 13 x 19 inches
-    // Convert inches to points (1 inch = 72 points)
-    const pageWidthInches = 13;
-    const pageHeightInches = 19;
-    const pageWidthPoints = pageWidthInches * 72;
-    const pageHeightPoints = pageHeightInches * 72;
-    
-    const doc = new PDFDocument({
-      size: [pageWidthPoints, pageHeightPoints],
-      layout: 'portrait'
-    });
-    
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="StickerSheet-${product.productName}.pdf"`);
-    
-    doc.pipe(res);
-    
-    // Sticker dimensions (all in points)
-    const stickerSizeInches = 1;
-    const stickerSizePoints = stickerSizeInches * 72;
-    const borderWidthPoints = 0.5; // Hairline stroke
-    const qrCodePaddingPoints = 4; // Minimal padding inside sticker
-    const serialNumberHeightPoints = 12; // Height for serial number text
-    
-    // Calculate QR code size to fit in top portion of sticker
+    const stickerSizePoints = 72; // 1 inch
+    const borderWidthPoints = 0.5;
+    const qrCodePaddingPoints = 4;
+    const serialNumberHeightPoints = 12;
     const qrCodeSizePoints = Math.max(20, stickerSizePoints - (2 * qrCodePaddingPoints) - serialNumberHeightPoints);
-    
-    // Spacing between stickers (convert inches to points)
-    const verticalSpacingPoints = verticalSpacing * 72;
-    const horizontalSpacingPoints = horizontalSpacing * 72;
-    
-    // Calculate grid layout
+    const verticalSpacingPoints = 0.05 * 72;
+    const horizontalSpacingPoints = 0;
     // Each pair takes 2 stickers horizontally + spacing
     const pairWidthPoints = (stickerSizePoints * 2) + horizontalSpacingPoints;
     const pairHeightPoints = stickerSizePoints + verticalSpacingPoints;
-    
-    // Calculate how many pairs fit on the page
-    const pairsPerRow = Math.floor(pageWidthPoints / pairWidthPoints);
-    const pairsPerColumn = Math.floor(pageHeightPoints / pairHeightPoints);
+    const pairsPerRow = Math.floor((pageWidth - 2 * margin) / pairWidthPoints);
+    const pairsPerColumn = Math.floor((pageHeight - 2 * margin) / pairHeightPoints);
     const pairsPerPage = pairsPerRow * pairsPerColumn;
-    
-    console.log('Sticker sheet layout:', {
-      pageWidthPoints,
-      pageHeightPoints,
-      pairWidthPoints,
-      pairHeightPoints,
-      pairsPerRow,
-      pairsPerColumn,
-      pairsPerPage,
-      qrcodesCount: qrcodes.length
-    });
-    
-    // Group QR codes into pairs (each QR code gets duplicated)
-    const qrPairs = [];
-    for (let i = 0; i < qrcodes.length; i++) {
-      qrPairs.push({
-        qrcode: qrcodes[i],
-        pairIndex: i
-      });
-    }
-    
-    let currentPage = 0;
-    let currentPairIndex = 0;
-    
-    for (let i = 0; i < qrPairs.length; i++) {
-      const pair = qrPairs[i];
-      
-      // Add new page if needed
-      if (currentPairIndex > 0 && currentPairIndex % pairsPerPage === 0) {
-        doc.addPage();
-        currentPage++;
-        currentPairIndex = 0;
+    const stickersPerRow = Math.floor((pageWidth - 2 * margin) / stickerSizePoints);
+    const stickersPerColumn = Math.floor((pageHeight - 2 * margin) / stickerSizePoints);
+    const stickersPerPage = stickersPerRow * stickersPerColumn;
+    const doc = new PDFDocument({ size: [pageWidth, pageHeight], layout: 'portrait' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${product.productName}-QRCodes.pdf"`);
+    doc.pipe(res);
+    if (duplicate) {
+      // Group QR codes into pairs (each QR code gets duplicated)
+      const qrPairs = qrcodes.map((qr, i) => ({ qrcode: qr, pairIndex: i }));
+      let currentPairIndex = 0;
+      for (let i = 0; i < qrPairs.length; i++) {
+        const pair = qrPairs[i];
+        if (currentPairIndex > 0 && currentPairIndex % pairsPerPage === 0) {
+          doc.addPage();
+          currentPairIndex = 0;
+        }
+        const pagePairIndex = currentPairIndex % pairsPerPage;
+        const row = Math.floor(pagePairIndex / pairsPerRow);
+        const col = pagePairIndex % pairsPerRow;
+        const pairStartX = margin + col * pairWidthPoints;
+        const pairStartY = margin + row * pairHeightPoints;
+        const qrUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/qr/${pair.qrcode.serialNumber}`;
+        try {
+          const qrCodeDataUrl = await QRCode.toDataURL(qrUrl, { width: qrCodeSizePoints, margin: 0 });
+          const qrImageBuffer = Buffer.from(qrCodeDataUrl.split(',')[1], 'base64');
+          for (let stickerIndex = 0; stickerIndex < 2; stickerIndex++) {
+            const stickerX = pairStartX + (stickerIndex * stickerSizePoints);
+            const stickerY = pairStartY;
+            doc.rect(stickerX, stickerY, stickerSizePoints, stickerSizePoints)
+              .lineWidth(borderWidthPoints)
+              .strokeColor('#000000')
+              .stroke();
+            const topMargin = 6;
+            const extraMargin = 2;
+            const qrStartX = stickerX + (stickerSizePoints - qrCodeSizePoints) / 2;
+            const qrStartY = stickerY + topMargin;
+            doc.image(qrImageBuffer, qrStartX, qrStartY, { width: qrCodeSizePoints, height: qrCodeSizePoints });
+            const serialNumberY = qrStartY + qrCodeSizePoints + extraMargin;
+            doc.fontSize(7)
+              .fillColor('#000000')
+              .text(pair.qrcode.serialNumber, stickerX, serialNumberY, { width: stickerSizePoints, align: 'center' });
+          }
+        } catch (qrError) {
+          for (let stickerIndex = 0; stickerIndex < 2; stickerIndex++) {
+            const stickerX = pairStartX + (stickerIndex * stickerSizePoints);
+            const stickerY = pairStartY;
+            doc.rect(stickerX, stickerY, stickerSizePoints, stickerSizePoints)
+              .lineWidth(borderWidthPoints)
+              .strokeColor('#cccccc')
+              .stroke();
+            const qrStartX = stickerX + qrCodePaddingPoints;
+            const qrStartY = stickerY + qrCodePaddingPoints;
+            doc.fontSize(6)
+              .fillColor('#666666')
+              .text('QR Error', qrStartX, qrStartY + qrCodeSizePoints / 2 - 3, { width: qrCodeSizePoints, align: 'center' });
+            const serialNumberY = stickerY + stickerSizePoints - serialNumberHeightPoints - 2;
+            doc.fontSize(6)
+              .fillColor('#000000')
+              .text(pair.qrcode.serialNumber, stickerX, serialNumberY, { width: stickerSizePoints, align: 'center' });
+          }
+        }
+        currentPairIndex++;
       }
-      
-      // Calculate position on current page
-      const pagePairIndex = currentPairIndex % pairsPerPage;
-      const row = Math.floor(pagePairIndex / pairsPerRow);
-      const col = pagePairIndex % pairsPerRow;
-      
-      // Calculate base position for this pair
-      const pairStartX = col * pairWidthPoints;
-      const pairStartY = row * pairHeightPoints;
-      
-      // Generate QR code
-      const qrUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/qr/${pair.qrcode.serialNumber}`;
-      
-      try {
-        console.log('Generating QR code for:', pair.qrcode.serialNumber);
-        const qrCodeDataUrl = await QRCode.toDataURL(qrUrl, {
-          width: qrCodeSizePoints,
-          margin: 0
-        });
-        const qrImageBuffer = Buffer.from(qrCodeDataUrl.split(',')[1], 'base64');
-        
-        // Draw two identical stickers side by side
-        for (let stickerIndex = 0; stickerIndex < 2; stickerIndex++) {
-          const stickerX = pairStartX + (stickerIndex * stickerSizePoints);
-          const stickerY = pairStartY;
-          // Draw sticker border (hairline stroke)
+    } else {
+      // No duplicate: each QR code only once per sticker
+      let currentStickerIndex = 0;
+      for (let i = 0; i < qrcodes.length; i++) {
+        if (currentStickerIndex > 0 && currentStickerIndex % stickersPerPage === 0) {
+          doc.addPage();
+          currentStickerIndex = 0;
+        }
+        const pageStickerIndex = currentStickerIndex % stickersPerPage;
+        const row = Math.floor(pageStickerIndex / stickersPerRow);
+        const col = pageStickerIndex % stickersPerRow;
+        const stickerX = margin + col * stickerSizePoints;
+        const stickerY = margin + row * stickerSizePoints;
+        const qrUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/qr/${qrcodes[i].serialNumber}`;
+        try {
+          const qrCodeDataUrl = await QRCode.toDataURL(qrUrl, { width: qrCodeSizePoints, margin: 0 });
+          const qrImageBuffer = Buffer.from(qrCodeDataUrl.split(',')[1], 'base64');
           doc.rect(stickerX, stickerY, stickerSizePoints, stickerSizePoints)
-             .lineWidth(borderWidthPoints)
-             .strokeColor('#000000')
-             .stroke();
-
-          // Add a top margin between QR code and upper border
-          const topMargin = 6; // points (1/12 inch)
-          const extraMargin = 2; // points between QR and serial (very small gap)
-          // Center QR code horizontally, and vertically in the upper part of the sticker
+            .lineWidth(borderWidthPoints)
+            .strokeColor('#000000')
+            .stroke();
+          const topMargin = 6;
+          const extraMargin = 2;
           const qrStartX = stickerX + (stickerSizePoints - qrCodeSizePoints) / 2;
           const qrStartY = stickerY + topMargin;
-
-          // Draw QR code
-          doc.image(qrImageBuffer, qrStartX, qrStartY, { 
-            width: qrCodeSizePoints, 
-            height: qrCodeSizePoints 
-          });
-
-          // Add serial number below QR code, centered
+          doc.image(qrImageBuffer, qrStartX, qrStartY, { width: qrCodeSizePoints, height: qrCodeSizePoints });
           const serialNumberY = qrStartY + qrCodeSizePoints + extraMargin;
           doc.fontSize(7)
-             .fillColor('#000000')
-             .text(pair.qrcode.serialNumber, stickerX, serialNumberY, { 
-               width: stickerSizePoints, 
-               align: 'center' 
-             });
-        }
-        
-      } catch (qrError) {
-        console.error('QR generation error:', qrError);
-        
-        // Draw placeholder stickers if QR generation fails
-        for (let stickerIndex = 0; stickerIndex < 2; stickerIndex++) {
-          const stickerX = pairStartX + (stickerIndex * stickerSizePoints);
-          const stickerY = pairStartY;
-          
-          // Draw sticker border
+            .fillColor('#000000')
+            .text(qrcodes[i].serialNumber, stickerX, serialNumberY, { width: stickerSizePoints, align: 'center' });
+        } catch (qrError) {
           doc.rect(stickerX, stickerY, stickerSizePoints, stickerSizePoints)
-             .lineWidth(borderWidthPoints)
-             .strokeColor('#cccccc')
-             .stroke();
-          
-          // Draw error placeholder
+            .lineWidth(borderWidthPoints)
+            .strokeColor('#cccccc')
+            .stroke();
           const qrStartX = stickerX + qrCodePaddingPoints;
           const qrStartY = stickerY + qrCodePaddingPoints;
-          
           doc.fontSize(6)
-             .fillColor('#666666')
-             .text('QR Error', qrStartX, qrStartY + qrCodeSizePoints/2 - 3, { 
-               width: qrCodeSizePoints, 
-               align: 'center' 
-             });
-          
-          // Add serial number
+            .fillColor('#666666')
+            .text('QR Error', qrStartX, qrStartY + qrCodeSizePoints / 2 - 3, { width: qrCodeSizePoints, align: 'center' });
           const serialNumberY = stickerY + stickerSizePoints - serialNumberHeightPoints - 2;
           doc.fontSize(6)
-             .fillColor('#000000')
-             .text(pair.qrcode.serialNumber, stickerX, serialNumberY, { 
-               width: stickerSizePoints, 
-               align: 'center' 
-             });
+            .fillColor('#000000')
+            .text(qrcodes[i].serialNumber, stickerX, serialNumberY, { width: stickerSizePoints, align: 'center' });
         }
+        currentStickerIndex++;
       }
-      
-      currentPairIndex++;
     }
-    
     doc.end();
   } catch (error) {
-    console.error('Sticker sheet generation error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Updated Download selected QR codes as PDF (A4 sticker layout, duplicate option)
+router.post('/qrcodes/download-selected-pdf', adminAuth, async (req, res) => {
+  try {
+    let { qrIds, duplicate } = req.body;
+    if (!qrIds || !Array.isArray(qrIds) || qrIds.length === 0) {
+      return res.status(400).json({ message: 'No QR codes selected' });
+    }
+    // Remove duplicates
+    qrIds = Array.from(new Set(qrIds));
+    const qrcodes = await QRCodeModel.find({ _id: { $in: qrIds } });
+    if (qrcodes.length === 0) {
+      return res.status(404).json({ message: 'No QR codes found' });
+    }
+    const product = await Product.findOne({ productId: qrcodes[0].productId });
+    if (!product) {
+      return res.status(404).json({ message: 'Product not found' });
+    }
+    // --- Sticker layout on A4 ---
+    const pageWidth = 595.28; // A4 width in points
+    const pageHeight = 841.89; // A4 height in points
+    const margin = 40;
+    const stickerSizePoints = 72; // 1 inch
+    const borderWidthPoints = 0.5;
+    const qrCodePaddingPoints = 4;
+    const serialNumberHeightPoints = 12;
+    const qrCodeSizePoints = Math.max(20, stickerSizePoints - (2 * qrCodePaddingPoints) - serialNumberHeightPoints);
+    const verticalSpacingPoints = 0.05 * 72;
+    const horizontalSpacingPoints = 0;
+    // Each pair takes 2 stickers horizontally + spacing
+    const pairWidthPoints = (stickerSizePoints * 2) + horizontalSpacingPoints;
+    const pairHeightPoints = stickerSizePoints + verticalSpacingPoints;
+    const pairsPerRow = Math.floor((pageWidth - 2 * margin) / pairWidthPoints);
+    const pairsPerColumn = Math.floor((pageHeight - 2 * margin) / pairHeightPoints);
+    const pairsPerPage = pairsPerRow * pairsPerColumn;
+    const stickersPerRow = Math.floor((pageWidth - 2 * margin) / stickerSizePoints);
+    const stickersPerColumn = Math.floor((pageHeight - 2 * margin) / stickerSizePoints);
+    const stickersPerPage = stickersPerRow * stickersPerColumn;
+    const doc = new PDFDocument({ size: [pageWidth, pageHeight], layout: 'portrait' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Selected-QRCodes-${product.productName}.pdf"`);
+    doc.pipe(res);
+    if (duplicate) {
+      // Group QR codes into pairs (each QR code gets duplicated)
+      const qrPairs = qrcodes.map((qr, i) => ({ qrcode: qr, pairIndex: i }));
+      let currentPairIndex = 0;
+      for (let i = 0; i < qrPairs.length; i++) {
+        const pair = qrPairs[i];
+        if (currentPairIndex > 0 && currentPairIndex % pairsPerPage === 0) {
+          doc.addPage();
+          currentPairIndex = 0;
+        }
+        const pagePairIndex = currentPairIndex % pairsPerPage;
+        const row = Math.floor(pagePairIndex / pairsPerRow);
+        const col = pagePairIndex % pairsPerRow;
+        const pairStartX = margin + col * pairWidthPoints;
+        const pairStartY = margin + row * pairHeightPoints;
+        const qrUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/qr/${pair.qrcode.serialNumber}`;
+        try {
+          const qrCodeDataUrl = await QRCode.toDataURL(qrUrl, { width: qrCodeSizePoints, margin: 0 });
+          const qrImageBuffer = Buffer.from(qrCodeDataUrl.split(',')[1], 'base64');
+          for (let stickerIndex = 0; stickerIndex < 2; stickerIndex++) {
+            const stickerX = pairStartX + (stickerIndex * stickerSizePoints);
+            const stickerY = pairStartY;
+            doc.rect(stickerX, stickerY, stickerSizePoints, stickerSizePoints)
+              .lineWidth(borderWidthPoints)
+              .strokeColor('#000000')
+              .stroke();
+            const topMargin = 6;
+            const extraMargin = 2;
+            const qrStartX = stickerX + (stickerSizePoints - qrCodeSizePoints) / 2;
+            const qrStartY = stickerY + topMargin;
+            doc.image(qrImageBuffer, qrStartX, qrStartY, { width: qrCodeSizePoints, height: qrCodeSizePoints });
+            const serialNumberY = qrStartY + qrCodeSizePoints + extraMargin;
+            doc.fontSize(7)
+              .fillColor('#000000')
+              .text(pair.qrcode.serialNumber, stickerX, serialNumberY, { width: stickerSizePoints, align: 'center' });
+          }
+        } catch (qrError) {
+          for (let stickerIndex = 0; stickerIndex < 2; stickerIndex++) {
+            const stickerX = pairStartX + (stickerIndex * stickerSizePoints);
+            const stickerY = pairStartY;
+            doc.rect(stickerX, stickerY, stickerSizePoints, stickerSizePoints)
+              .lineWidth(borderWidthPoints)
+              .strokeColor('#cccccc')
+              .stroke();
+            const qrStartX = stickerX + qrCodePaddingPoints;
+            const qrStartY = stickerY + qrCodePaddingPoints;
+            doc.fontSize(6)
+              .fillColor('#666666')
+              .text('QR Error', qrStartX, qrStartY + qrCodeSizePoints / 2 - 3, { width: qrCodeSizePoints, align: 'center' });
+            const serialNumberY = stickerY + stickerSizePoints - serialNumberHeightPoints - 2;
+            doc.fontSize(6)
+              .fillColor('#000000')
+              .text(pair.qrcode.serialNumber, stickerX, serialNumberY, { width: stickerSizePoints, align: 'center' });
+          }
+        }
+        currentPairIndex++;
+      }
+    } else {
+      // No duplicate: each QR code only once per sticker
+      let currentStickerIndex = 0;
+      for (let i = 0; i < qrcodes.length; i++) {
+        if (currentStickerIndex > 0 && currentStickerIndex % stickersPerPage === 0) {
+          doc.addPage();
+          currentStickerIndex = 0;
+        }
+        const pageStickerIndex = currentStickerIndex % stickersPerPage;
+        const row = Math.floor(pageStickerIndex / stickersPerRow);
+        const col = pageStickerIndex % stickersPerRow;
+        const stickerX = margin + col * stickerSizePoints;
+        const stickerY = margin + row * stickerSizePoints;
+        const qrUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/qr/${qrcodes[i].serialNumber}`;
+        try {
+          const qrCodeDataUrl = await QRCode.toDataURL(qrUrl, { width: qrCodeSizePoints, margin: 0 });
+          const qrImageBuffer = Buffer.from(qrCodeDataUrl.split(',')[1], 'base64');
+          doc.rect(stickerX, stickerY, stickerSizePoints, stickerSizePoints)
+            .lineWidth(borderWidthPoints)
+            .strokeColor('#000000')
+            .stroke();
+          const topMargin = 6;
+          const extraMargin = 2;
+          const qrStartX = stickerX + (stickerSizePoints - qrCodeSizePoints) / 2;
+          const qrStartY = stickerY + topMargin;
+          doc.image(qrImageBuffer, qrStartX, qrStartY, { width: qrCodeSizePoints, height: qrCodeSizePoints });
+          const serialNumberY = qrStartY + qrCodeSizePoints + extraMargin;
+          doc.fontSize(7)
+            .fillColor('#000000')
+            .text(qrcodes[i].serialNumber, stickerX, serialNumberY, { width: stickerSizePoints, align: 'center' });
+        } catch (qrError) {
+          doc.rect(stickerX, stickerY, stickerSizePoints, stickerSizePoints)
+            .lineWidth(borderWidthPoints)
+            .strokeColor('#cccccc')
+            .stroke();
+          const qrStartX = stickerX + qrCodePaddingPoints;
+          const qrStartY = stickerY + qrCodePaddingPoints;
+          doc.fontSize(6)
+            .fillColor('#666666')
+            .text('QR Error', qrStartX, qrStartY + qrCodeSizePoints / 2 - 3, { width: qrCodeSizePoints, align: 'center' });
+          const serialNumberY = stickerY + stickerSizePoints - serialNumberHeightPoints - 2;
+          doc.fontSize(6)
+            .fillColor('#000000')
+            .text(qrcodes[i].serialNumber, stickerX, serialNumberY, { width: stickerSizePoints, align: 'center' });
+        }
+        currentStickerIndex++;
+      }
+    }
+    doc.end();
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Generate sticker sheet PDF (13x19 inches, duplicate option)
+router.post('/qrcodes/sticker-sheet', adminAuth, async (req, res) => {
+  try {
+    const { qrIds, verticalSpacing = 0.05, horizontalSpacing = 0, duplicate = true } = req.body;
+    if (!qrIds || !Array.isArray(qrIds) || qrIds.length === 0) {
+      return res.status(400).json({ message: 'No QR codes selected' });
+    }
+    const qrcodes = await QRCodeModel.find({ _id: { $in: qrIds } });
+    if (qrcodes.length === 0) {
+      return res.status(404).json({ message: 'No QR codes found' });
+    }
+    const product = await Product.findOne({ productId: qrcodes[0].productId });
+    if (!product) {
+      return res.status(404).json({ message: 'Product not found' });
+    }
+    // --- Sticker layout on 13x19 inches ---
+    const pageWidth = 13 * 72; // 936 points
+    const pageHeight = 19 * 72; // 1368 points
+    const margin = 40;
+    const stickerSizePoints = 72; // 1 inch
+    const borderWidthPoints = 0.5;
+    const qrCodePaddingPoints = 4;
+    const serialNumberHeightPoints = 12;
+    const qrCodeSizePoints = Math.max(20, stickerSizePoints - (2 * qrCodePaddingPoints) - serialNumberHeightPoints);
+    const verticalSpacingPoints = verticalSpacing * 72;
+    const horizontalSpacingPoints = horizontalSpacing * 72;
+    // Each pair takes 2 stickers horizontally + spacing
+    const pairWidthPoints = (stickerSizePoints * 2) + horizontalSpacingPoints;
+    const pairHeightPoints = stickerSizePoints + verticalSpacingPoints;
+    const pairsPerRow = Math.floor((pageWidth - 2 * margin) / pairWidthPoints);
+    const pairsPerColumn = Math.floor((pageHeight - 2 * margin) / pairHeightPoints);
+    const pairsPerPage = pairsPerRow * pairsPerColumn;
+    const stickersPerRow = Math.floor((pageWidth - 2 * margin) / stickerSizePoints);
+    const stickersPerColumn = Math.floor((pageHeight - 2 * margin) / stickerSizePoints);
+    const stickersPerPage = stickersPerRow * stickersPerColumn;
+    const doc = new PDFDocument({ size: [pageWidth, pageHeight], layout: 'portrait' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="StickerSheet-${product.productName}.pdf"`);
+    doc.pipe(res);
+    if (duplicate) {
+      // Group QR codes into pairs (each QR code gets duplicated)
+      const qrPairs = qrcodes.map((qr, i) => ({ qrcode: qr, pairIndex: i }));
+      let currentPairIndex = 0;
+      for (let i = 0; i < qrPairs.length; i++) {
+        const pair = qrPairs[i];
+        if (currentPairIndex > 0 && currentPairIndex % pairsPerPage === 0) {
+          doc.addPage();
+          currentPairIndex = 0;
+        }
+        const pagePairIndex = currentPairIndex % pairsPerPage;
+        const row = Math.floor(pagePairIndex / pairsPerRow);
+        const col = pagePairIndex % pairsPerRow;
+        const pairStartX = margin + col * pairWidthPoints;
+        const pairStartY = margin + row * pairHeightPoints;
+        const qrUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/qr/${pair.qrcode.serialNumber}`;
+        try {
+          const qrCodeDataUrl = await QRCode.toDataURL(qrUrl, { width: qrCodeSizePoints, margin: 0 });
+          const qrImageBuffer = Buffer.from(qrCodeDataUrl.split(',')[1], 'base64');
+          for (let stickerIndex = 0; stickerIndex < 2; stickerIndex++) {
+            const stickerX = pairStartX + (stickerIndex * stickerSizePoints);
+            const stickerY = pairStartY;
+            doc.rect(stickerX, stickerY, stickerSizePoints, stickerSizePoints)
+              .lineWidth(borderWidthPoints)
+              .strokeColor('#000000')
+              .stroke();
+            const topMargin = 6;
+            const extraMargin = 2;
+            const qrStartX = stickerX + (stickerSizePoints - qrCodeSizePoints) / 2;
+            const qrStartY = stickerY + topMargin;
+            doc.image(qrImageBuffer, qrStartX, qrStartY, { width: qrCodeSizePoints, height: qrCodeSizePoints });
+            const serialNumberY = qrStartY + qrCodeSizePoints + extraMargin;
+            doc.fontSize(7)
+              .fillColor('#000000')
+              .text(pair.qrcode.serialNumber, stickerX, serialNumberY, { width: stickerSizePoints, align: 'center' });
+          }
+        } catch (qrError) {
+          for (let stickerIndex = 0; stickerIndex < 2; stickerIndex++) {
+            const stickerX = pairStartX + (stickerIndex * stickerSizePoints);
+            const stickerY = pairStartY;
+            doc.rect(stickerX, stickerY, stickerSizePoints, stickerSizePoints)
+              .lineWidth(borderWidthPoints)
+              .strokeColor('#cccccc')
+              .stroke();
+            const qrStartX = stickerX + qrCodePaddingPoints;
+            const qrStartY = stickerY + qrCodePaddingPoints;
+            doc.fontSize(6)
+              .fillColor('#666666')
+              .text('QR Error', qrStartX, qrStartY + qrCodeSizePoints / 2 - 3, { width: qrCodeSizePoints, align: 'center' });
+            const serialNumberY = stickerY + stickerSizePoints - serialNumberHeightPoints - 2;
+            doc.fontSize(6)
+              .fillColor('#000000')
+              .text(pair.qrcode.serialNumber, stickerX, serialNumberY, { width: stickerSizePoints, align: 'center' });
+          }
+        }
+        currentPairIndex++;
+      }
+    } else {
+      // No duplicate: each QR code only once per sticker
+      let currentStickerIndex = 0;
+      for (let i = 0; i < qrcodes.length; i++) {
+        if (currentStickerIndex > 0 && currentStickerIndex % stickersPerPage === 0) {
+          doc.addPage();
+          currentStickerIndex = 0;
+        }
+        const pageStickerIndex = currentStickerIndex % stickersPerPage;
+        const row = Math.floor(pageStickerIndex / stickersPerRow);
+        const col = pageStickerIndex % stickersPerRow;
+        const stickerX = margin + col * stickerSizePoints;
+        const stickerY = margin + row * stickerSizePoints;
+        const qrUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/qr/${qrcodes[i].serialNumber}`;
+        try {
+          const qrCodeDataUrl = await QRCode.toDataURL(qrUrl, { width: qrCodeSizePoints, margin: 0 });
+          const qrImageBuffer = Buffer.from(qrCodeDataUrl.split(',')[1], 'base64');
+          doc.rect(stickerX, stickerY, stickerSizePoints, stickerSizePoints)
+            .lineWidth(borderWidthPoints)
+            .strokeColor('#000000')
+            .stroke();
+          const topMargin = 6;
+          const extraMargin = 2;
+          const qrStartX = stickerX + (stickerSizePoints - qrCodeSizePoints) / 2;
+          const qrStartY = stickerY + topMargin;
+          doc.image(qrImageBuffer, qrStartX, qrStartY, { width: qrCodeSizePoints, height: qrCodeSizePoints });
+          const serialNumberY = qrStartY + qrCodeSizePoints + extraMargin;
+          doc.fontSize(7)
+            .fillColor('#000000')
+            .text(qrcodes[i].serialNumber, stickerX, serialNumberY, { width: stickerSizePoints, align: 'center' });
+        } catch (qrError) {
+          doc.rect(stickerX, stickerY, stickerSizePoints, stickerSizePoints)
+            .lineWidth(borderWidthPoints)
+            .strokeColor('#cccccc')
+            .stroke();
+          const qrStartX = stickerX + qrCodePaddingPoints;
+          const qrStartY = stickerY + qrCodePaddingPoints;
+          doc.fontSize(6)
+            .fillColor('#666666')
+            .text('QR Error', qrStartX, qrStartY + qrCodeSizePoints / 2 - 3, { width: qrCodeSizePoints, align: 'center' });
+          const serialNumberY = stickerY + stickerSizePoints - serialNumberHeightPoints - 2;
+          doc.fontSize(6)
+            .fillColor('#000000')
+            .text(qrcodes[i].serialNumber, stickerX, serialNumberY, { width: stickerSizePoints, align: 'center' });
+        }
+        currentStickerIndex++;
+      }
+    }
+    doc.end();
+  } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
